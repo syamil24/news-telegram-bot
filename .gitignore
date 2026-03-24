@@ -1,0 +1,7 @@
+.env
+node_modules/
+*.session
+*.session-journal
+session/
+session.txt
+seen.json
