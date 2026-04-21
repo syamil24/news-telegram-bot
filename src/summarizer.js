@@ -100,6 +100,138 @@ Keep total length under 350 words. No financial advice.`;
 }
 
 /**
+ * AI-driven filter + summarize in a single Groq call.
+ *
+ * The model decides whether the article is worth reading and, if so,
+ * returns a formatted summary. If not, it returns a SKIP decision with
+ * a short reason so the article can be shown as a headline-only link.
+ *
+ * Return value is always an object:
+ *   { skip: true,  reason: string }                  — show as headline link
+ *   { skip: false, summary: string }                  — send full summary
+ *
+ * @param {Object} article  { title, author, date, category, content, url, wordCount }
+ * @returns {{ skip: boolean, reason?: string, summary?: string }}
+ */
+async function filterAndSummarizeStarArticle(article) {
+  const systemPrompt =
+`You are a smart news curator and summarizer for a busy Malaysian reader who wants to stay informed on what truly matters.
+
+Your job is BOTH to decide whether an article deserves a full summary AND to write that summary if it does.
+
+━━━ SKIP THESE (return DECISION: SKIP) ━━━
+
+China / Chinese politics:
+  Any news primarily about China, the Chinese government, Beijing leadership, Xi Jinping, the CCP, PRC foreign policy, Hong Kong protests, Xinjiang, Tibet, or products labelled "Made in China" / "China-made".
+
+Celebrity & entertainment fluff:
+  Celebrity spotted / dating / breakup / engaged / marriage rumours, K-pop or K-drama cast news, singer or actor personal life stories, music video releases, red carpet events, award shows, Billboard chart updates, showbiz gossip.
+
+Daily stock market routine:
+  Bursa opens/closes, KLCI opens/closes higher or lower, ringgit opens/closes, midday market updates — these are routine price-ticker reports with no analytical value.
+
+Minor local accidents:
+  Road accidents, car / lorry / motorcycle crashes, highway or expressway accidents, cyclists or pedestrians killed in traffic incidents.
+
+Suicide & self-harm reports:
+  Person jumps to death, body found, drowned, falls to death, suicide reports.
+
+Petty / minor crime:
+  Snatch theft, house break-ins, burglary, car theft, robbery of individuals, pickpocketing, drug trafficking arrests, casino raids, vice raids, prostitution rings — unless the story exposes a systemic issue.
+
+Weather reports:
+  Weather forecasts, rainfall updates, flood warnings, haze readings, wind advisories — routine meteorological reports with no broader news significance.
+
+Very short news briefs:
+  Articles under 85 words that are routine updates with no substantive new information.
+
+━━━ ALWAYS SUMMARIZE THESE (return DECISION: SUMMARIZE) ━━━
+
+Even if an article touches on a normally-skipped category, summarize it if it involves:
+• Geopolitical events: wars, invasions, military strikes, airstrikes, ceasefires, war crimes, genocide, nuclear threats, missile tests
+• International relations: sanctions, trade wars, trade deals, tariffs, embargoes, blockades, diplomatic talks, bilateral or multilateral agreements
+• Key geopolitical actors: Iran, Israel, Ukraine, Russia, North Korea, Gaza, Palestine, Hezbollah, Hamas, Taiwan
+• Global hotspots: South China Sea, Taiwan Strait, Strait of Hormuz
+• Major institutions & leaders: NATO, UN Security Council, IMF, World Bank, WTO, G7, G20, BRICS, Trump, White House, Pentagon
+• Malaysian economics & policy: Budget, EPF, Bank Negara, interest rates, major government policy, GLC announcements
+• Science, technology, environment, education, public health (non-routine), and well-researched opinion/editorial pieces
+
+━━━ RESPONSE FORMAT — follow EXACTLY, no extra text before or after ━━━
+
+If skipping:
+DECISION: SKIP
+REASON: <one short phrase explaining why>
+
+If summarizing:
+DECISION: SUMMARIZE
+📰 *<Title>*
+📅 <Date> | 🏷️ <Category>
+✍️ <Author>
+
+📝 *Summary:*
+• <key fact 1>
+• <key fact 2>
+• <key fact 3>
+• <key fact 4 if needed>
+
+💡 *Key Takeaway:*
+<One sentence on why this matters>
+
+Rules: respond in English only. Use *bold* and bullet points only — no #headings, no underscores for bold. Keep summaries under 350 words. No financial advice.`;
+
+  const userPrompt =
+`Evaluate and optionally summarize the article below.
+
+Title   : ${article.title}
+Author  : ${article.author   || 'Not specified'}
+Date    : ${article.date     || 'Not specified'}
+Category: ${article.category || 'General'}
+Words   : ${article.wordCount || 'Unknown'}
+
+Content:
+${article.content}`;
+
+  let raw;
+  try {
+    raw = await callGroq(systemPrompt, userPrompt, 700);
+  } catch (err) {
+    console.error('[AI] filterAndSummarizeStarArticle failed:', err.message);
+    // On total AI failure fall back to a basic card (safe — show content)
+    return {
+      skip: false,
+      summary: (
+        `📰 *${article.title}*\n` +
+        `📅 ${article.date || 'N/A'} | 🏷️ ${article.category || 'General'}\n\n` +
+        `${article.content.substring(0, 400)}...\n\n` +
+        `🔗 [Read full article](${article.url})`
+      ),
+    };
+  }
+
+  // ── Parse the structured response ──────────────────────────────────────────
+  const firstLine = raw.split('\n')[0].trim();
+
+  if (firstLine.startsWith('DECISION: SKIP')) {
+    // Extract reason from second line if present
+    const reasonLine = raw.split('\n').find(l => l.startsWith('REASON:'));
+    const reason = reasonLine ? reasonLine.replace('REASON:', '').trim() : 'AI filtered';
+    console.log(`[AI Filter] SKIP — ${article.title} — ${reason}`);
+    return { skip: true, reason };
+  }
+
+  if (firstLine.startsWith('DECISION: SUMMARIZE')) {
+    // Strip the decision line; the rest is the formatted summary
+    const summary = raw.split('\n').slice(1).join('\n').trim();
+    console.log(`[AI Filter] SUMMARIZE — ${article.title}`);
+    return { skip: false, summary };
+  }
+
+  // ── Fallback: malformed response — default to summarize (safe) ─────────────
+  console.warn(`[AI Filter] Unexpected response format for "${article.title}" — defaulting to summarize`);
+  return { skip: false, summary: raw };
+}
+
+/**
  * Digest a batch of trading channel messages.
  * @param {Array}  messages      [{ text, date }]
  * @param {string} channelName
@@ -184,6 +316,7 @@ async function summarizeSingleMessage(text, channelName) {
 
 module.exports = {
   summarizeStarArticle,
+  filterAndSummarizeStarArticle,
   summarizeTradingMessages,
   summarizeSingleMessage,
 };

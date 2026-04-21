@@ -1,8 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { scrapeArticle, isStarUrl } = require('./scraper');
-const { summarizeStarArticle, summarizeTradingMessages, summarizeSingleMessage } = require('./summarizer');
-const { fetchChannelMessages, extractUrls } = require('./userbot');
-const { shouldSkipArticle } = require('./filter');
+const { filterAndSummarizeStarArticle, summarizeTradingMessages, summarizeSingleMessage } = require('./summarizer');
+const { fetchChannelMessages, markChannelAsRead, extractUrls } = require('./userbot');
 const { loadSeen, getLastMessageId, setLastMessageId, hasSeenUrl, markUrlSeen } = require('./seen');
 
 let bot = null;
@@ -109,8 +108,9 @@ Welcome! I monitor your Telegram channels and deliver AI-powered summaries.
 /help - Show this help message
 
 *Smart Filtering (The Star):*
-• Skips: celebrities, daily stock open/close, minor accidents, minor crimes
-• Summarizes: major events, economy, opinion, tech, travel, knowledge & more
+• All articles are sent to Groq AI for evaluation
+• AI skips: celebrities, daily stock open/close, minor accidents, minor crimes, China politics
+• AI summarizes: major events, geopolitics, economy, opinion, tech, travel, knowledge & more
 
 *Powered by Groq AI (Llama 3.3)*
 `;
@@ -124,7 +124,7 @@ Welcome! I monitor your Telegram channels and deliver AI-powered summaries.
 📖 *Bot Help*
 
 */star* — Summarize all relevant new articles from The Star channel
-*/star [number]* — Scan last N messages instead of default 20 (e.g. \`/star 30\`)
+*/star [number]* — Scan last N messages instead of default 50 (e.g. \`/star 30\`)
 */trading* — Get AI market digest from Newbie Trading channel
 */trading [number]* — Digest last N messages (e.g. \`/trading 30\`)
 */latest* — Quick digest from both channels
@@ -132,11 +132,12 @@ Welcome! I monitor your Telegram channels and deliver AI-powered summaries.
 */help* — Show this help
 
 *Smart Filtering (The Star):*
-❌ Skipped: celebrities, daily KLCI/Bursa open-close, minor road accidents, suicides, petty crime
-✅ Summarized: economy, major events, opinion, tech, travel, science, education & more
+Every article is evaluated by Groq AI in a single call that both filters and summarizes.
+❌ AI skips: China politics, celebrities, daily KLCI/Bursa open-close, minor road accidents, suicides, petty crime
+✅ AI summarizes: geopolitics, major events, economy, policy, tech, science, education & more
 
 *Automatic Mode:*
-The bot listens in real-time and pushes summaries only for articles that pass the filter.
+The bot listens in real-time and pushes summaries only for articles the AI decides are worth reading.
 `;
     await bot.sendMessage(chatId, help, { parse_mode: PARSE_MODE });
   });
@@ -159,8 +160,6 @@ The bot listens in real-time and pushes summaries only for articles that pass th
   // /star command - fetch and summarize The Star articles
   bot.onText(/\/star(?:\s+(\d+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
-    // Optional arg now controls how many channel messages to scan (not summary cap)
-    const scanLimit = Math.min(parseInt(match[1]) || 15, 50);
     const starChannel = process.env.THE_STAR_CHANNEL;
 
     if (!starChannel) {
@@ -174,23 +173,33 @@ The bot listens in real-time and pushes summaries only for articles that pass th
 
     const isTestMode = process.env.TEST_MODE === 'true';
 
-    // In test mode: ignore seen history, always fetch latest N messages fresh
-    // In production: only fetch messages newer than the last processed ID
     let messages;
     let highestId;
 
     if (isTestMode) {
+      // Test mode: fetch the last N messages regardless of read cursor
+      const scanLimit = Math.min(parseInt(match[1]) || 50, 200);
       messages = await fetchChannelMessages(starChannel, scanLimit);
       highestId = null; // don't advance cursor in test mode
       await bot.sendMessage(chatId,
-        `🧪 *Test mode* — fetching latest *${scanLimit}* messages, ignoring seen history.`,
+        `🧪 *Test mode* — fetching latest *${scanLimit}* messages, ignoring read cursor.`,
         { parse_mode: PARSE_MODE }
       );
     } else {
+      // Production: fetch only messages newer than the last read cursor.
+      // minId is exclusive in GramJS (returns messages with id > minId),
+      // so passing lastId naturally gives us only the unread ones.
+      // Use a generous ceiling of 200 so we never miss a burst of posts.
       const lastId = getLastMessageId(starChannel);
-      const fetchLimit = lastId === 0 ? scanLimit : Math.max(scanLimit, 50);
-      messages = await fetchChannelMessages(starChannel, fetchLimit, lastId);
+      messages = await fetchChannelMessages(starChannel, 200, lastId);
       highestId = lastId;
+
+      if (lastId === 0) {
+        await bot.sendMessage(chatId,
+          `ℹ️ First run — no read cursor found. Fetching up to *200* recent messages.`,
+          { parse_mode: PARSE_MODE }
+        );
+      }
     }
 
     if (messages.length === 0) {
@@ -201,7 +210,7 @@ The bot listens in real-time and pushes summaries only for articles that pass th
     }
 
     await bot.sendMessage(chatId,
-      `🔍 Found *${messages.length}* message(s). Scanning for articles...`,
+      `🔍 Found *${messages.length}* new message(s). Scanning for articles...`,
       { parse_mode: PARSE_MODE }
     );
 
@@ -210,9 +219,7 @@ The bot listens in real-time and pushes summaries only for articles that pass th
       console.log(`[Star] msg#${m.id} | URLs: ${m.urls.length > 0 ? m.urls.join(', ') : '(none)'} | text: ${m.text.substring(0, 80).replace(/\n/g,' ')}`);
     }
 
-    // Collect unique Star URLs
-    // In test mode: include all URLs regardless of seen history
-    // In production: skip URLs already processed
+    // Collect unique Star URLs, tracking the highest message ID seen
     const starUrls = [];
     const dedup = new Set();
     for (const m of messages) {
@@ -226,7 +233,11 @@ The bot listens in real-time and pushes summaries only for articles that pass th
     }
 
     if (starUrls.length === 0) {
-      if (!isTestMode) setLastMessageId(starChannel, highestId);
+      // Still advance cursor and mark as read even if no article links were found
+      if (!isTestMode && highestId !== null && highestId > 0) {
+        setLastMessageId(starChannel, highestId);
+        await markChannelAsRead(starChannel, highestId);
+      }
       return bot.sendMessage(chatId,
         '📭 No Star article links found in these messages.',
         { parse_mode: PARSE_MODE }
@@ -235,7 +246,7 @@ The bot listens in real-time and pushes summaries only for articles that pass th
 
     try {
       let summarized = 0;
-      let headlines = []; // filtered articles — show as hyperlinks
+      let headlines = []; // AI-filtered articles — show as hyperlinks
 
       for (const url of starUrls) {
         await sendTyping(chatId);
@@ -248,15 +259,14 @@ The bot listens in real-time and pushes summaries only for articles that pass th
             continue;
           }
 
-          const { skip, reason } = shouldSkipArticle(article);
-          if (skip) {
-            console.log(`[Filter] Skipped: ${article.title} — ${reason}`);
+          const result = await filterAndSummarizeStarArticle(article);
+          if (result.skip) {
+            console.log(`[AI Filter] Skipped: ${article.title} — ${result.reason}`);
             headlines.push({ title: article.title, url });
             continue;
           }
 
-          const summary = await summarizeStarArticle(article);
-          await sendLongMessage(chatId, summary + `\n\n🔗 [Read Full Article](${url})`);
+          await sendLongMessage(chatId, result.summary + `\n\n🔗 [Read Full Article](${url})`);
           summarized++;
           await sleep(1000);
         } catch (err) {
@@ -270,8 +280,11 @@ The bot listens in real-time and pushes summaries only for articles that pass th
         await sendLongMessage(chatId, `📋 *Also in The Star* _(not summarized — tap to read)_\n\n${lines}`);
       }
 
-      // Only advance the cursor in production mode
-      if (!isTestMode && highestId !== null) setLastMessageId(starChannel, highestId);
+      // Advance the read cursor and mark the channel as read in Telegram
+      if (!isTestMode && highestId !== null && highestId > 0) {
+        setLastMessageId(starChannel, highestId);
+        await markChannelAsRead(starChannel, highestId);
+      }
 
       if (summarized === 0 && headlines.length === 0) {
         await bot.sendMessage(chatId, `📭 No Star articles found in new messages.`, { parse_mode: PARSE_MODE });
@@ -349,10 +362,12 @@ The bot listens in real-time and pushes summaries only for articles that pass th
 }
 
 /**
- * Push a new Star article summary to all authorized chats
- * Called by main.js when a new message is detected in the Star channel
+ * Push a new Star article summary to all authorized chats.
+ * Called by index.js when a new message is detected in the Star channel.
+ * @param {string} url       - article URL extracted from the channel message
+ * @param {number} messageId - Telegram message ID of the channel post (used to advance the read cursor)
  */
-async function pushStarSummary(url) {
+async function pushStarSummary(url, messageId) {
   if (authorizedChats.size === 0) {
     console.log('[Bot] No authorized chats to push to.');
     return;
@@ -364,29 +379,34 @@ async function pushStarSummary(url) {
     return;
   }
 
+  const starChannel = process.env.THE_STAR_CHANNEL;
+
   try {
     const article = await scrapeArticle(url);
     markUrlSeen(url); // mark regardless of outcome
 
     if (!article || article.content.length < 100) return;
 
-    // Apply smart filter before pushing
-    const { skip, reason } = shouldSkipArticle(article);
-    if (skip) {
-      console.log(`[Filter] Real-time push headline-only: ${article.title} — ${reason}`);
+    // Apply AI filter + summarize in one call
+    const result = await filterAndSummarizeStarArticle(article);
+    if (result.skip) {
+      console.log(`[AI Filter] Real-time push headline-only: ${article.title} — ${result.reason}`);
       // Buffer the headline; flush as a grouped message after a short delay
       headlineBuffer.push({ title: article.title, url });
       if (headlineFlushTimer) clearTimeout(headlineFlushTimer);
       headlineFlushTimer = setTimeout(flushHeadlines, HEADLINE_FLUSH_DELAY);
-      return;
+    } else {
+      const fullMessage = `📡 *New from The Star*\n\n${result.summary}\n\n🔗 [Read Full Article](${url})`;
+      for (const chatId of authorizedChats) {
+        await sendLongMessage(chatId, fullMessage);
+        await sleep(200);
+      }
     }
 
-    const summary = await summarizeStarArticle(article);
-    const fullMessage = `📡 *New from The Star*\n\n${summary}\n\n🔗 [Read Full Article](${url})`;
-
-    for (const chatId of authorizedChats) {
-      await sendLongMessage(chatId, fullMessage);
-      await sleep(200);
+    // Advance the read cursor and mark the channel as read in Telegram
+    if (starChannel && messageId) {
+      setLastMessageId(starChannel, messageId);
+      await markChannelAsRead(starChannel, messageId);
     }
   } catch (err) {
     console.error('[Bot] Failed to push Star summary:', err.message);

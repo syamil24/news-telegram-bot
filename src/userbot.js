@@ -89,6 +89,25 @@ async function listDialogs() {
 }
 
 /**
+ * Mark all messages in a channel as read up to (and including) maxId.
+ * Uses the personal userbot account, so it updates the actual unread counter
+ * in Telegram just as if the user had opened the channel.
+ *
+ * @param {string} channelIdentifier - channel username or name
+ * @param {number} maxId - highest message ID to mark as read
+ */
+async function markChannelAsRead(channelIdentifier, maxId) {
+  try {
+    const entity = await client.getEntity(channelIdentifier);
+    await client.markAsRead(entity, undefined, { maxId });
+    console.log(`[Userbot] Marked ${channelIdentifier} as read up to message #${maxId}`);
+  } catch (err) {
+    // Non-fatal — log and continue; seen.json cursor still advances
+    console.warn(`[Userbot] Could not mark ${channelIdentifier} as read:`, err.message);
+  }
+}
+
+/**
  * Fetch recent messages from a channel by name or username
  * @param {string} channelIdentifier - channel username or name
  * @param {number} limit - max number of messages to fetch
@@ -200,6 +219,7 @@ module.exports = {
   getClient,
   listDialogs,
   fetchChannelMessages,
+  markChannelAsRead,
   listenForNewMessages,
   extractUrls,
 };

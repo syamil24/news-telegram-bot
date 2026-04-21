@@ -74,7 +74,7 @@ async function main() {
         const starUrls = message.urls.filter(isStarUrl);
         for (const url of starUrls) {
           console.log(`[Main] New Star article detected: ${url}`);
-          await pushStarSummary(url);
+          await pushStarSummary(url, message.id);
         }
       } else if (isTradingChannel) {
         // For Trading channel: buffer messages and batch-summarize

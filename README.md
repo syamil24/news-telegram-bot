@@ -85,15 +85,15 @@ Send `/start` to your bot in Telegram.
 
 ## Bot Commands
 
-| Command | Description |
-|---|---|
-| `/star` | Fetch and summarize new articles from The Star channel |
-| `/star 30` | Scan last 30 messages instead of the default 20 |
-| `/trading` | Get AI market digest from the trading channel |
-| `/trading 30` | Digest last 30 trading messages |
-| `/latest` | Quick digest from both channels |
-| `/channels` | Show configured channel names |
-| `/help` | Show help message |
+| Command       | Description                                            |
+| ------------- | ------------------------------------------------------ |
+| `/star`       | Fetch and summarize new articles from The Star channel |
+| `/star 30`    | Scan last 30 messages instead of the default 20        |
+| `/trading`    | Get AI market digest from the trading channel          |
+| `/trading 30` | Digest last 30 trading messages                        |
+| `/latest`     | Quick digest from both channels                        |
+| `/channels`   | Show configured channel names                          |
+| `/help`       | Show help message                                      |
 
 ## Article Filtering
 
@@ -102,7 +102,7 @@ Articles are evaluated in this order:
 1. **Always skip** (shown as headline hyperlink) — China-related news
 2. **Always summarize** — geopolitical topics (sanctions, trade wars, conflicts, Iran, Israel, Ukraine, Russia, Trump, etc.)
 3. **Skip** — celebrities, daily Bursa/KLCI open-close, minor road accidents, suicides, petty crime
-4. **Skip** — articles under 110 words (too short to be meaningful)
+4. **Skip** — articles under 85 words (too short to be meaningful)
 5. Everything else — summarized
 
 Skipped articles are not discarded. They appear grouped at the bottom as tap-to-read headline hyperlinks.
